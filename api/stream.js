@@ -119,10 +119,10 @@ module.exports = async function handler (req, res) {
     const m3u8Res  = await fetchUrl(m3u8Url);
     let playlist   = m3u8Res.body.toString('utf8');
     const hostHdr  = req.headers['x-forwarded-host'] || req.headers.host;
-    playlist = playlist.replace(
-      /URI="https:\/\/[^"]+\/wmsxx\.php\?([^"]+)"/,
-      `URI="https://${hostHdr}/api/stream/key?$1"`
-    );
+		playlist = playlist.replace(
+			/URI="[^"]*wmsxx\.php\?([^"]+)"/g,
+			'URI="/api/stream/key?$1"'                  // no host – always same origin
+		);
 
     // (g) Respond with modified playlist
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
