@@ -116,13 +116,19 @@ module.exports = async function handler (req, res) {
       : `https://${sk}new.newkso.ru/${sk}/${channelKey}/mono.m3u8`;
 
     // (f) Retrieve and rewrite its key URI to point back to us
-    const m3u8Res  = await fetchUrl(m3u8Url);
-    let playlist   = m3u8Res.body.toString('utf8');
-    const hostHdr  = req.headers['x-forwarded-host'] || req.headers.host;
-		playlist = playlist.replace(
-			/URI="[^"]*wmsxx\.php\?([^"]+)"/g,
-			'URI="/api/stream/key?$1"'                  // no host – always same origin
-		);
+	// (f) Retrieve and rewrite its key URI to point back to us
+	const m3u8Res = await fetchUrl(m3u8Url);
+	let playlist  = m3u8Res.body.toString('utf8');
+	
+	// Which host/protocol did the user hit?
+	const proto = req.headers['x-forwarded-proto'] || 'https';
+	const host  = req.headers['x-forwarded-host'] || req.headers.host;
+	
+	// Replace *any* …/key?<query> OR …/wmsxx.php?<query>
+	playlist = playlist.replace(
+	  /URI="[^"]*(?:key|wmsxx\.php)\?([^"]+)"/i,
+	  `URI="${proto}://${host}/api/stream/key?$1"`
+	);
 
     // (g) Respond with modified playlist
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
