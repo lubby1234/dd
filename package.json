@@ -1,0 +1,6 @@
+{
+  "name": "stream-proxy",
+  "version": "1.0.0",
+  "main": "api/stream.js",
+  "license": "MIT"
+}

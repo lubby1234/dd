@@ -1,0 +1,6 @@
+{
+  "routes": [
+    { "src": "^/key$", "dest": "/api/stream/key" },
+    { "src": "^/stream$", "dest": "/api/stream" }
+  ]
+}
