@@ -17,7 +17,7 @@ const HEADERS = {
  * Uses http/https core modules so it’s compatible even when global fetch
  * isn’t available.
  */
-function fetchUrl (url, extraHeaders = {}) {
+function fetchUrl(url, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const lib     = url.startsWith('https://') ? https : http;
     const headers = { ...HEADERS, ...extraHeaders };
@@ -43,15 +43,18 @@ function fetchUrl (url, extraHeaders = {}) {
  * or for key rewrites:
  *   https://<project>.vercel.app/api/stream/key?<query>
  */
-module.exports = async function handler (req, res) {
+module.exports = async function handler(req, res) {
   try {
     // Parse original URL (includes path after /api/stream)
     const urlObj = new URL(req.url, `http://${req.headers.host}`);
 
+    // Strip off the /api/stream prefix so we can match "/key" below
+    const trimmedPath = urlObj.pathname.replace(/^\/api\/stream/, '');
+
     /* ---------------------------------------------------- *
-     * 1) Handle AES-key proxy  (/key?...params)
+     * 1) Handle AES-key proxy  (/api/stream/key?...params)
      * ---------------------------------------------------- */
-    if (urlObj.pathname === '/key') {
+    if (trimmedPath === '/key') {
       // CORS pre-flight
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
@@ -62,21 +65,21 @@ module.exports = async function handler (req, res) {
         return res.end();
       }
 
+      // Proxy the key request upstream
       const queryString = urlObj.searchParams.toString();
       const keyUrl      = `https://top2.newkso.ru/wmsxx.php?${queryString}`;
-
-      const keyRes = await fetchUrl(keyUrl, { Origin: 'https://forcedtoplay.xyz' });
+      const keyRes      = await fetchUrl(keyUrl, { Origin: 'https://forcedtoplay.xyz' });
 
       res.writeHead(keyRes.statusCode, {
-        'Content-Type':              'application/octet-stream',
-        'Content-Length':            keyRes.body.length,
+        'Content-Type':               'application/octet-stream',
+        'Content-Length':             keyRes.body.length,
         'Access-Control-Allow-Origin': '*'
       });
       return res.end(keyRes.body);
     }
 
     /* ---------------------------------------------------- *
-     * 2) Main playlist proxy  (/stream?id=...)
+     * 2) Main playlist proxy  (/api/stream?id=...)
      * ---------------------------------------------------- */
     const id = urlObj.searchParams.get('id');
     if (!id) {
@@ -98,7 +101,6 @@ module.exports = async function handler (req, res) {
     // (c) Auth request to get temporary access
     const authUrl = `https://top2new.newkso.ru/auth.php?channel_id=${channelKey}` +
                     `&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
-
     const authResApi = await fetchUrl(authUrl);
     const authJson   = JSON.parse(authResApi.body.toString('utf8'));
     if (authJson.status !== 'ok') throw new Error('Auth API returned error');
@@ -107,7 +109,6 @@ module.exports = async function handler (req, res) {
     const lookupUrl = `https://forcedtoplay.xyz/server_lookup.php?channel_id=${channelKey}`;
     const lookupRes = await fetchUrl(lookupUrl);
     if (lookupRes.statusCode !== 200) throw new Error('Lookup API error');
-
     const { server_key: sk } = JSON.parse(lookupRes.body.toString('utf8'));
 
     // (e) Build the master playlist URL
@@ -116,27 +117,26 @@ module.exports = async function handler (req, res) {
       : `https://${sk}new.newkso.ru/${sk}/${channelKey}/mono.m3u8`;
 
     // (f) Retrieve and rewrite its key URI to point back to us
-	// (f) Retrieve and rewrite its key URI to point back to us
-	const m3u8Res = await fetchUrl(m3u8Url);
-	let playlist  = m3u8Res.body.toString('utf8');
-	
-	// Which host/protocol did the user hit?
-	const proto = req.headers['x-forwarded-proto'] || 'https';
-	const host  = req.headers['x-forwarded-host'] || req.headers.host;
-	
-	// Replace *any* …/key?<query> OR …/wmsxx.php?<query>
-	playlist = playlist.replace(
-	  /URI="[^"]*(?:key|wmsxx\.php)\?([^"]+)"/i,
-	  `URI="${proto}://${host}/api/stream/key?$1"`
-	);
+    const m3u8Res = await fetchUrl(m3u8Url);
+    let playlist  = m3u8Res.body.toString('utf8');
+
+    // Determine the correct protocol & host for replacement
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host  = req.headers['x-forwarded-host'] || req.headers.host;
+
+    // Rewrite ANY key URL (both old /wmsxx.php and localhost) to our API
+    playlist = playlist.replace(
+      /URI="[^"]*(?:wmsxx\.php|key)\?([^"]+)"/i,
+      `URI="${proto}://${host}/api/stream/key?$1"`
+    );
 
     // (g) Respond with modified playlist
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
-    res.end(playlist);
+    return res.end(playlist);
 
   } catch (err) {
     console.error('Stream Proxy Error:', err);
     res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('Error: ' + err.message);
+    return res.end('Error: ' + err.message);
   }
 };
