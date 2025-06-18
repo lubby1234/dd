@@ -1,64 +1,46 @@
-// api/stream/key.js
-const { fetchUrl, HEADERS } = require('../util');
-const { URL } = require('url');
-
-/* ---------------- shared one-time auth helper ---------------- */
-global.authed = global.authed || new Set();
+// at the top of api/stream/key.js
+global.keyCache = global.keyCache || new Map();
 
 /**
- * Ensures this Lambda instance has called the correct auth.php for the channel.
- * If html is provided we can extract the real ts/rnd/sig straight away (stream.js case);
- * otherwise we fetch the embed ourselves (first call coming directly to /key).
+ * Try to return a cached Buffer for this exact query string,
+ * or undefined if missing / expired.
  */
-async function getKeyAuthFor(channelKey, embedHtml = null) {
-  if (global.authed.has(channelKey)) return;
-
-  if (!embedHtml) {
-    const embedUrl = `https://forcedtoplay.xyz/premiumtv/daddylivehd.php?id=${channelKey.replace(/^premium/, '')}`;
-    embedHtml = (await fetchUrl(embedUrl)).body.toString('utf8');
+function getCachedKey(keyUrl) {
+  const entry = global.keyCache.get(keyUrl);
+  if (!entry || Date.now() > entry.exp) {
+    global.keyCache.delete(keyUrl);
+    return;
   }
-
-  const authTs  = embedHtml.match(/var\s+authTs\s*=\s*"([^"]+)";/)[1];
-  const authRnd = embedHtml.match(/var\s+authRnd\s*=\s*"([^"]+)";/)[1];
-  const authSig = embedHtml.match(/var\s+authSig\s*=\s*"([^"]+)";/)[1];
-  const host    = (embedHtml.match(/https?:\/\/([^/]+)\/auth\.php/) || [, 'top2new.newkso.ru'])[1];
-
-  const authUrl = `https://${host}/auth.php?channel_id=${channelKey}&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
-  const resp    = JSON.parse((await fetchUrl(authUrl)).body);
-  if (resp.status !== 'ok') throw new Error('Auth API returned: ' + resp.status);
-
-  global.authed.add(channelKey);
+  return entry.buf;
 }
 
-module.exports.getKeyAuthFor = getKeyAuthFor;  // exported for stream.js reuse
+/** Store the key Buffer for 24h */
+function setCachedKey(keyUrl, buf) {
+  global.keyCache.set(keyUrl, { 
+    buf, 
+    exp: Date.now() + 24 * 60 * 60 * 1000 
+  });
+}
 
-/* ----------------------------- Lambda handler ----------------------------- */
-module.exports.default = async (req, res) => {
-  try {
-    if (req.method === 'OPTIONS') {
-      return res.writeHead(204, {
-        'Access-Control-Allow-Origin':  '*',
-        'Access-Control-Allow-Methods': 'GET,OPTIONS',
-        'Access-Control-Allow-Headers': '*'
-      }).end();
-    }
+// inside your key handler, just before fetchUrl:
+const rawUrl = `https://top2.newkso.ru/wmsxx.php?${url.searchParams.toString()}`;
 
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const params = url.searchParams;
-    const channelKey = (params.get('name') || '').toLowerCase(); // e.g. premium324
-    if (!channelKey) return res.writeHead(400).end('Missing name parameter');
+// try cache first
+let keyBody = getCachedKey(rawUrl);
+if (!keyBody) {
+  // ensure auth has run…
+  await getKeyAuthFor(channelKey);
+  // actually fetch
+  const upstream = await fetchUrl(rawUrl);
+  keyBody = upstream.body;
+  // cache it for 24h
+  setCachedKey(rawUrl, keyBody);
+}
 
-    await getKeyAuthFor(channelKey);          // make sure we’re authed
-    const keyUrl = `https://top2.newkso.ru/wmsxx.php?${params.toString()}`;
-    const keyRes = await fetchUrl(keyUrl);
-
-    res.writeHead(keyRes.statusCode, {
-      'Content-Type':               'application/octet-stream',
-      'Content-Length':             keyRes.body.length,
-      'Access-Control-Allow-Origin': '*'
-    }).end(keyRes.body);
-  } catch (err) {
-    console.error(err);
-    res.writeHead(500).end('Error: ' + err.message);
-  }
-};
+// now return the Buffer
+res.writeHead(200, {
+  'Content-Type':               'application/octet-stream',
+  'Content-Length':             keyBody.length,
+  'Access-Control-Allow-Origin': '*'
+});
+return res.end(keyBody);
