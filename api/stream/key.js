@@ -1,44 +1,39 @@
 // api/stream/key.js
-const http  = require('http');
-const https = require('https');
+const { fetchUrl, HEADERS } = require('../util');
 const { URL } = require('url');
 
-/* -- same headers helper -------------------------------------- */
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0',
-  Origin:  'https://forcedtoplay.xyz',
-  Referer: 'https://forcedtoplay.xyz/'
-};
-function fetchUrl(url) {
-  return new Promise((resolve, reject) => {
-    const lib = url.startsWith('https://') ? https : http;
-    lib.get(url, { headers: HEADERS }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () =>
-        resolve({
-          statusCode: res.statusCode,
-          body:       Buffer.concat(chunks)
-        })
-      );
-    }).on('error', reject);
-  });
-}
-
-/* -- optional one-time auth to avoid 403 on cold start -------- */
+/* ---------------- shared one-time auth helper ---------------- */
 global.authed = global.authed || new Set();
-async function ensureAuth(channelKey) {
+
+/**
+ * Ensures this Lambda instance has called the correct auth.php for the channel.
+ * If html is provided we can extract the real ts/rnd/sig straight away (stream.js case);
+ * otherwise we fetch the embed ourselves (first call coming directly to /key).
+ */
+async function getKeyAuthFor(channelKey, embedHtml = null) {
   if (global.authed.has(channelKey)) return;
-  const now = Date.now().toString().slice(0, 10);
-  const rnd = Math.random().toString(16).slice(2, 10);
-  const fakeSig = '00000000000000000000000000000000'; // placeholder
-  const url = `https://top2new.newkso.ru/auth.php?channel_id=${channelKey}&ts=${now}&rnd=${rnd}&sig=${fakeSig}`;
-  try { await fetchUrl(url); } catch (_) {}
+
+  if (!embedHtml) {
+    const embedUrl = `https://forcedtoplay.xyz/premiumtv/daddylivehd.php?id=${channelKey.replace(/^premium/, '')}`;
+    embedHtml = (await fetchUrl(embedUrl)).body.toString('utf8');
+  }
+
+  const authTs  = embedHtml.match(/var\s+authTs\s*=\s*"([^"]+)";/)[1];
+  const authRnd = embedHtml.match(/var\s+authRnd\s*=\s*"([^"]+)";/)[1];
+  const authSig = embedHtml.match(/var\s+authSig\s*=\s*"([^"]+)";/)[1];
+  const host    = (embedHtml.match(/https?:\/\/([^/]+)\/auth\.php/) || [, 'top2new.newkso.ru'])[1];
+
+  const authUrl = `https://${host}/auth.php?channel_id=${channelKey}&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
+  const resp    = JSON.parse((await fetchUrl(authUrl)).body);
+  if (resp.status !== 'ok') throw new Error('Auth API returned: ' + resp.status);
+
   global.authed.add(channelKey);
 }
 
-/* ---------------- lambda handler ----------------------------- */
-module.exports = async (req, res) => {
+module.exports.getKeyAuthFor = getKeyAuthFor;  // exported for stream.js reuse
+
+/* ----------------------------- Lambda handler ----------------------------- */
+module.exports.default = async (req, res) => {
   try {
     if (req.method === 'OPTIONS') {
       return res.writeHead(204, {
@@ -48,15 +43,13 @@ module.exports = async (req, res) => {
       }).end();
     }
 
-    const url    = new URL(req.url, `http://${req.headers.host}`);
-    const params = url.searchParams.toString();
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const params = url.searchParams;
+    const channelKey = (params.get('name') || '').toLowerCase(); // e.g. premium324
+    if (!channelKey) return res.writeHead(400).end('Missing name parameter');
 
-    /* extract channelKey from ?name=premium324… */
-    const name   = url.searchParams.get('name') || '';
-    const channelKey = name.replace(/^premium/, '');
-    if (channelKey) await ensureAuth(channelKey);
-
-    const keyUrl = `https://top2.newkso.ru/wmsxx.php?${params}`;
+    await getKeyAuthFor(channelKey);          // make sure we’re authed
+    const keyUrl = `https://top2.newkso.ru/wmsxx.php?${params.toString()}`;
     const keyRes = await fetchUrl(keyUrl);
 
     res.writeHead(keyRes.statusCode, {
@@ -64,9 +57,8 @@ module.exports = async (req, res) => {
       'Content-Length':             keyRes.body.length,
       'Access-Control-Allow-Origin': '*'
     }).end(keyRes.body);
-
-  } catch (e) {
-    console.error(e);
-    res.writeHead(500).end('Error: ' + e.message);
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500).end('Error: ' + err.message);
   }
 };
