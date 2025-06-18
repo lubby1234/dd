@@ -1,83 +1,34 @@
 // api/stream.js
-const http  = require('http');
-const https = require('https');
+const { getKeyAuthFor } = require('./stream/key');   // reuse helper!
+const { fetchUrl, HEADERS } = require('./util');      // small utils below
 const { URL } = require('url');
 
-/* ------------ shared constants & helpers ---------------- */
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0',
-  Origin:  'https://forcedtoplay.xyz',
-  Referer: 'https://forcedtoplay.xyz/'
-};
-
-function fetchUrl(url, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const lib     = url.startsWith('https://') ? https : http;
-    const headers = { ...HEADERS, ...extraHeaders };
-    lib.get(url, { headers }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () =>
-        resolve({
-          statusCode: res.statusCode,
-          headers:    res.headers,
-          body:       Buffer.concat(chunks)
-        })
-      );
-    }).on('error', reject);
-  });
-}
-
-/* ----- 24-h in-memory cache (per warm lambda) ------------ */
-global.htmlCache = global.htmlCache || new Map();
-function setHtml(key, val)  { global.htmlCache.set(key, { val, exp: Date.now()+86_400_000 }); }
-function getHtml(key)       {
-  const e = global.htmlCache.get(key);
-  if (!e || Date.now() > e.exp) { global.htmlCache.delete(key); return; }
-  return e.val;
-}
-
-/* -------------------- lambda handler -------------------- */
 module.exports = async (req, res) => {
   try {
-    const url   = new URL(req.url, `http://${req.headers.host}`);
-    const id    = url.searchParams.get('id');
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const id  = url.searchParams.get('id');
     if (!id) return res.writeHead(400).end('Missing id parameter');
 
-    /* Fetch the embed HTML (cached) -------------------------------- */
+    /* --- pull HTML & vars (cached) --------------------------------- */
     const embedUrl = `https://forcedtoplay.xyz/premiumtv/daddylivehd.php?id=${id}`;
-    let html = getHtml(embedUrl);
-    if (!html) {
-      html = (await fetchUrl(embedUrl)).body.toString('utf8');
-      setHtml(embedUrl, html);
-    }
+    const html = await fetchCachedHtml(embedUrl);
 
-    /* Extract variables ------------------------------------------- */
     const channelKey = html.match(/var\s+channelKey\s*=\s*"([^"]+)";/)[1];
-    const authTs     = html.match(/var\s+authTs\s*=\s*"([^"]+)";/)[1];
-    const authRnd    = html.match(/var\s+authRnd\s*=\s*"([^"]+)";/)[1];
-    const authSig    = html.match(/var\s+authSig\s*=\s*"([^"]+)";/)[1];
 
-    /* Run the auth call (once per cold start) ---------------------- */
-    global.authed = global.authed || new Set();
-    if (!global.authed.has(channelKey)) {
-      const host = (html.match(/https?:\/\/([^/]+)\/auth\.php/) || [, 'top2new.newkso.ru'])[1];
-      const authUrl = `https://${host}/auth.php?channel_id=${channelKey}&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
-      const authJson = JSON.parse((await fetchUrl(authUrl)).body);
-      if (authJson.status !== 'ok') throw new Error('Auth failed');
-      global.authed.add(channelKey);
-    }
+    /* --- make sure we've authed this Lambda instance --------------- */
+    await getKeyAuthFor(channelKey, html);   // <— real auth happens here
 
-    /* Lookup CDN & build m3u8 URL --------------------------------- */
+    /* --- build m3u8 url ------------------------------------------- */
     const { server_key: sk } =
       JSON.parse((await fetchUrl(`https://forcedtoplay.xyz/server_lookup.php?channel_id=${channelKey}`)).body);
-    const m3u8Url =
+
+    const m3u8 =
       sk === 'top1/cdn'
         ? `https://top1.newkso.ru/${sk}/${channelKey}/mono.m3u8`
         : `https://${sk}new.newkso.ru/${sk}/${channelKey}/mono.m3u8`;
 
-    /* Fetch playlist & rewrite key URI ---------------------------- */
-    let playlist = (await fetchUrl(m3u8Url)).body.toString('utf8');
+    /* --- patch playlist ------------------------------------------- */
+    let playlist = (await fetchUrl(m3u8)).body.toString('utf8');
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     playlist = playlist.replace(
       /URI="https:\/\/[^"]+\/wmsxx\.php\?([^"]+)"/,
@@ -85,8 +36,18 @@ module.exports = async (req, res) => {
     );
 
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' }).end(playlist);
-  } catch (e) {
-    console.error(e);
-    res.writeHead(500).end('Error: ' + e.message);
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500).end('Error: ' + err.message);
   }
 };
+
+/* ---------- tiny local helpers & cache shared across warm invocations ------ */
+global.htmlCache = global.htmlCache || new Map();
+async function fetchCachedHtml(url) {
+  const cached = global.htmlCache.get(url);
+  if (cached && Date.now() < cached.exp) return cached.val;
+  const html = (await fetchUrl(url)).body.toString('utf8');
+  global.htmlCache.set(url, { val: html, exp: Date.now() + 86_400_000 });
+  return html;
+}
