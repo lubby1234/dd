@@ -1,6 +1,10 @@
 {
+  "version": 2,
   "routes": [
-    { "src": "^/key$", "dest": "/api/stream/key" },
+    // When the browser/player does GET /key?... → invoke our function with route = "/key"
+    { "src": "^/key$",    "dest": "/api/stream/key" },
+
+    // When it does GET /stream?... → invoke our function with route = "/"
     { "src": "^/stream$", "dest": "/api/stream" }
   ]
 }
