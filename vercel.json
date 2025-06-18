@@ -1,13 +1,1 @@
-{
-  "version": 2,
-  "rewrites": [
-    {
-      "source": "/key",
-      "destination": "/api/stream/key"
-    },
-    {
-      "source": "/stream",
-      "destination": "/api/stream"
-    }
-  ]
-}
+
