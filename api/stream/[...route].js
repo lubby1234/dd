@@ -67,20 +67,27 @@ module.exports = async function handler(req, res) {
       return res.end('Missing id parameter');
     }
 
-    // (a) Scrape auth vars from embedded player HTML
-    const htmlUrl = `https://forcedtoplay.xyz/premiumtv/daddylivehd.php?id=${id}`;
-    const html    = (await fetchUrl(htmlUrl)).body.toString('utf8');
-
-    const channelKey = html.match(/var\s+channelKey\s*=\s*"([^"]+)";/)[1];
-    const authTs     = html.match(/var\s+authTs\s*=\s*"([^"]+)";/)[1];
-    const authRnd    = html.match(/var\s+authRnd\s*=\s*"([^"]+)";/)[1];
-    const authSig    = html.match(/var\s+authSig\s*=\s*"([^"]+)";/)[1];
-
-    // (b) Auth handshake
-    const authUrl   = `https://top2new.newkso.ru/auth.php?channel_id=${channelKey}` +
-                      `&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
-    const authJson  = JSON.parse((await fetchUrl(authUrl)).body.toString('utf8'));
-    if (authJson.status !== 'ok') throw new Error('Auth API returned error');
+   // (a) Scrape auth vars and dynamic domain from embedded player HTML
+  const htmlUrl = `https://forcedtoplay.xyz/premiumtv/daddylivehd.php?id=${id}`;
+  const html    = (await fetchUrl(htmlUrl)).body.toString('utf8');
+  
+  // Extract required JS vars
+  const channelKey = html.match(/var\s+channelKey\s*=\s*"([^"]+)";/)[1];
+  const authTs     = html.match(/var\s+authTs\s*=\s*"([^"]+)";/)[1];
+  const authRnd    = html.match(/var\s+authRnd\s*=\s*"([^"]+)";/)[1];
+  const authSig    = html.match(/var\s+authSig\s*=\s*"([^"]+)";/)[1];
+  
+  // 🔥 Extract dynamic subdomain (e.g. "top2new") from player JS
+  const domainMatch = html.match(/https:\/\/([a-z0-9]+new)\.newkso\.ru/i);
+  if (!domainMatch) throw new Error('Failed to extract dynamic upstream domain');
+  const dynamicHost = `${domainMatch[1]}.newkso.ru`;
+  
+  // (b) Auth handshake to dynamic domain
+  const authUrl = `https://${dynamicHost}/auth.php?channel_id=${channelKey}` +
+                  `&ts=${authTs}&rnd=${authRnd}&sig=${encodeURIComponent(authSig)}`;
+  
+  const authJson = JSON.parse((await fetchUrl(authUrl)).body.toString('utf8'));
+  if (authJson.status !== 'ok') throw new Error('Auth API returned error');
 
     // (c) CDN shard lookup
     const lookupUrl = `https://forcedtoplay.xyz/server_lookup.php?channel_id=${channelKey}`;
