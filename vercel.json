@@ -1,8 +1,13 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "^/key$",    "dest": "/api/stream/key" },
-    { "src": "^/stream$", "dest": "/api/stream" }
+  "rewrites": [
+    {
+      "source": "/key",
+      "destination": "/api/stream/key"
+    },
+    {
+      "source": "/stream",
+      "destination": "/api/stream"
+    }
   ]
 }
-
